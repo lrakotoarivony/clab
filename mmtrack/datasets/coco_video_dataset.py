@@ -216,6 +216,9 @@ class CocoVideoDataset(CocoDataset):
                 ref_img_info['filename'] = ref_img_info['file_name']
                 ref_img_infos.append(ref_img_info)
             ref_img_infos = sorted(ref_img_infos, key=lambda i: i['frame_id'])
+        
+        if len(ref_img_infos) == 1:
+            ref_img_infos.append(ref_img_infos[0])
 
         if return_key_img:
             return [img_info, *ref_img_infos]

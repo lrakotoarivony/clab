@@ -8,6 +8,8 @@ from mmdet.models import build_detector
 from ..builder import MODELS
 from .base import BaseVideoDetector
 
+from ..simclr_head import SimCLRHead
+
 
 @MODELS.register_module()
 class SELSA(BaseVideoDetector):
@@ -19,6 +21,8 @@ class SELSA(BaseVideoDetector):
 
     def __init__(self,
                  detector,
+                 loss_simclr,
+                 temperature,
                  pretrains=None,
                  init_cfg=None,
                  frozen_modules=None,
@@ -39,6 +43,24 @@ class SELSA(BaseVideoDetector):
             'selsa video detector only supports two stage detector'
         self.train_cfg = train_cfg
         self.test_cfg = test_cfg
+
+        index_resnet = min(detector['backbone']['out_indices'])
+        if detector['backbone']['type'] == 'SwinTransformer':
+            if index_resnet == 3:
+                channel_start = 1024
+            elif index_resnet == 2:
+                channel_start = 512
+            elif index_resnet == 1:
+                channel_start = 256
+        else:
+            if index_resnet == 3:
+                channel_start = 2048
+            elif index_resnet == 2:
+                channel_start = 1024
+            elif index_resnet == 1:
+                channel_start = 512
+
+        self.auxiliary = SimCLRHead(loss_weight= loss_simclr, temperature=temperature, sequence_num=self.detector.roi_head.bbox_roi_extractor.num_most_similar_points, channel_start=channel_start)
 
         if frozen_modules is not None:
             self.freeze_module(frozen_modules)
@@ -129,16 +151,16 @@ class SELSA(BaseVideoDetector):
         Returns:
             dict[str, Tensor]: a dictionary of loss components
         """
-        assert len(img) == 1, \
-            'selsa video detector only supports 1 batch size per gpu for now.'
+        N, T, C, H, W = ref_img.shape
 
-        all_imgs = torch.cat((img, ref_img[0]), dim=0)
-        all_x = self.detector.extract_feat(all_imgs)
-        x = []
-        ref_x = []
-        for i in range(len(all_x)):
-            x.append(all_x[i][[0]])
-            ref_x.append(all_x[i][1:])
+        feature, feature_simclr = self.extract_feat_simclr(img)
+        
+        ref_feature = []
+        ref_feature_simclr = []
+        for i in range(N):
+            f, f_simclr = self.extract_feat_simclr(ref_img[i,:,:,:,:])
+            ref_feature.append(f)
+            ref_feature_simclr.append(f_simclr)
 
         losses = dict()
 
@@ -147,7 +169,7 @@ class SELSA(BaseVideoDetector):
             proposal_cfg = self.detector.train_cfg.get(
                 'rpn_proposal', self.detector.test_cfg.rpn)
             rpn_losses, proposal_list = self.detector.rpn_head.forward_train(
-                x,
+                feature,
                 img_metas,
                 gt_bboxes,
                 gt_labels=None,
@@ -155,18 +177,38 @@ class SELSA(BaseVideoDetector):
                 proposal_cfg=proposal_cfg)
             losses.update(rpn_losses)
 
-            ref_proposals_list = self.detector.rpn_head.simple_test_rpn(
-                ref_x, ref_img_metas[0])
+            ref_proposals_list = []
+            for i,ref_feature_i in enumerate(ref_feature):
+                ref_img_meta = ref_img_metas[i]
+                ref_proposals_list.append(self.detector.rpn_head.simple_test_rpn(ref_feature_i, ref_img_meta))
+
         else:
             proposal_list = proposals
             ref_proposals_list = ref_proposals
 
         roi_losses = self.detector.roi_head.forward_train(
-            x, ref_x, img_metas, proposal_list, ref_proposals_list, gt_bboxes,
+            feature, ref_feature, img_metas, proposal_list, ref_proposals_list, gt_bboxes,
             gt_labels, gt_bboxes_ignore, gt_masks, **kwargs)
         losses.update(roi_losses)
 
+
+        embeddings = [feature_i[0] for feature_i in ref_feature_simclr]
+        embeddings.insert(0, feature_simclr[0])
+        
+        embeddings = torch.cat(embeddings, dim = 0)
+
+        auxiliary_loss = self.auxiliary.loss(embeddings)
+        losses.update(auxiliary_loss)
         return losses
+
+    def extract_feat_simclr(self, img):
+        """Directly extract features from the backbone+neck."""
+        x = self.detector.backbone(img)
+        x_simclr = [x[0]]
+        x = [x[-1]]
+        if self.detector.with_neck:
+            x = self.detector.neck(x)
+        return x, x_simclr
 
     def extract_feats(self, img, img_metas, ref_img, ref_img_metas):
         """Extract features for `img` during testing.
@@ -209,14 +251,14 @@ class SELSA(BaseVideoDetector):
             if frame_id == 0:
                 self.memo = Dict()
                 self.memo.img_metas = ref_img_metas[0]
-                ref_x = self.detector.extract_feat(ref_img[0])
+                ref_x, _ = self.extract_feat_simclr(ref_img[0])
                 # 'tuple' object (e.g. the output of FPN) does not support
                 # item assignment
                 self.memo.feats = []
                 for i in range(len(ref_x)):
                     self.memo.feats.append(ref_x[i])
 
-            x = self.detector.extract_feat(img)
+            x, _ = self.extract_feat_simclr(img)
             ref_x = self.memo.feats.copy()
             for i in range(len(x)):
                 ref_x[i] = torch.cat((ref_x[i], x[i]), dim=0)
@@ -227,7 +269,7 @@ class SELSA(BaseVideoDetector):
             if frame_id == 0:
                 self.memo = Dict()
                 self.memo.img_metas = ref_img_metas[0]
-                ref_x = self.detector.extract_feat(ref_img[0])
+                ref_x, _ = self.extract_feat_simclr(ref_img[0])
                 # 'tuple' object (e.g. the output of FPN) does not support
                 # item assignment
                 self.memo.feats = []
@@ -239,7 +281,7 @@ class SELSA(BaseVideoDetector):
             elif frame_id % frame_stride == 0:
                 assert ref_img is not None
                 x = []
-                ref_x = self.detector.extract_feat(ref_img[0])
+                ref_x, _ = self.extract_feat_simclr(ref_img[0])
                 for i in range(len(ref_x)):
                     self.memo.feats[i] = torch.cat(
                         (self.memo.feats[i], ref_x[i]), dim=0)[1:]
@@ -248,7 +290,7 @@ class SELSA(BaseVideoDetector):
                 self.memo.img_metas = self.memo.img_metas[1:]
             else:
                 assert ref_img is None
-                x = self.detector.extract_feat(img)
+                x, _ = self.extract_feat_simclr(img)
 
             ref_x = self.memo.feats.copy()
             for i in range(len(x)):

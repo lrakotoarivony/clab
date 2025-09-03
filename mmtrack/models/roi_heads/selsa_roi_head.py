@@ -77,32 +77,51 @@ class SelsaRoIHead(StandardRoIHead):
 
         return losses
 
-    def _bbox_forward(self, x, ref_x, rois, ref_rois):
+    def _bbox_forward(self, x, ref_x, rois, ref_rois, len_bbox=None, len_ref_bboxes=None):
         """Box head forward function used in both training and testing."""
-        # TODO: a more flexible way to decide which feature maps to use
+        N = len(ref_x)
         bbox_feats = self.bbox_roi_extractor(
-            x[:self.bbox_roi_extractor.num_inputs],
+            [x[0]],
             rois,
-            ref_feats=ref_x[:self.bbox_roi_extractor.num_inputs])
+            ref_feats=ref_x, len_bbox=len_bbox)
 
-        ref_bbox_feats = self.bbox_roi_extractor(
-            ref_x[:self.bbox_roi_extractor.num_inputs], ref_rois)
+        if N > 1:
+            ref_bbox_feats = self.bbox_roi_extractor([torch.cat([x[0] for x in ref_x])], ref_rois)
+            ref_bbox_feats = torch.split(ref_bbox_feats, len_ref_bboxes, dim = 0)
+        else:
+            ref_bbox_feats = self.bbox_roi_extractor(ref_x, ref_rois)
+        
         if self.with_shared_head:
             bbox_feats = self.shared_head(bbox_feats)
             ref_bbox_feats = self.shared_head(ref_bbox_feats)
-        cls_score, bbox_pred = self.bbox_head(bbox_feats, ref_bbox_feats)
 
-        bbox_results = dict(
-            cls_score=cls_score, bbox_pred=bbox_pred, bbox_feats=bbox_feats)
+        cls_score = []
+        bbox_pred = []
+        if N > 1:
+            for i in range(N):
+                cls_s, bbox_p = self.bbox_head(bbox_feats[i], ref_bbox_feats[i])
+                cls_score.append(cls_s)
+                bbox_pred.append(bbox_p)
+            cls_score = torch.cat(cls_score)
+            bbox_pred = torch.cat(bbox_pred)
+        else:
+            cls_score, bbox_pred = self.bbox_head(bbox_feats, ref_bbox_feats)
+        
+        bbox_results = dict(cls_score=cls_score, bbox_pred=bbox_pred, bbox_feats=bbox_feats)
         return bbox_results
 
     def _bbox_forward_train(self, x, ref_x, sampling_results,
                             ref_proposal_list, gt_bboxes, gt_labels):
         """Run forward function and calculate loss for box head in training."""
         rois = bbox2roi([res.bboxes for res in sampling_results])
-        ref_rois = bbox2roi(ref_proposal_list)
-        bbox_results = self._bbox_forward(x, ref_x, rois, ref_rois)
+        ref_rois = bbox2roi(sum(ref_proposal_list, []))
 
+        N = len(ref_x)
+        bbox_result = []
+        len_bbox = [len(res.bboxes) for res in sampling_results]
+        len_ref_bboxes = [torch.cat(res).shape[0] for res in ref_proposal_list]
+        bbox_results = self._bbox_forward(x, ref_x, rois, ref_rois, len_bbox=len_bbox, len_ref_bboxes=len_ref_bboxes)
+        
         bbox_targets = self.bbox_head.get_targets(sampling_results, gt_bboxes,
                                                   gt_labels, self.train_cfg)
         loss_bbox = self.bbox_head.loss(bbox_results['cls_score'],

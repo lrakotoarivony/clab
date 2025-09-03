@@ -3,8 +3,13 @@ _base_ = [
     '../../_base_/datasets/imagenet_vid_fgfa_style.py',
     '../../_base_/default_runtime.py'
 ]
+
+loss_simclr = 0.005
+
 model = dict(
     type='SELSA',
+    loss_simclr=0.005,
+    temperature=0.1,
     detector=dict(
         roi_head=dict(
             type='SelsaRoIHead',
@@ -53,3 +58,8 @@ lr_config = dict(
 # runtime settings
 total_epochs = 7
 evaluation = dict(metric=['bbox'], interval=7)
+
+custom_imports = dict(imports=['mmtrack.core.utils.simclrhook'], allow_failed_imports=False)
+custom_hooks = [
+    dict(type='SimCLRHook', value=loss_simclr, num_step=25000, priority='NORMAL')
+]

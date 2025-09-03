@@ -32,6 +32,7 @@ class TemporalRoIAlign(SingleRoIExtractor):
         super(TemporalRoIAlign, self).__init__(*args, **kwargs)
         self.num_most_similar_points = num_most_similar_points
         self.num_temporal_attention_blocks = num_temporal_attention_blocks
+        self.epsilon = 1e-10
         if self.num_temporal_attention_blocks > 0:
             self.embed_network = ConvModule(
                 self.out_channels,
@@ -125,10 +126,10 @@ class TemporalRoIAlign(SingleRoIExtractor):
         roi_feats_embed = roi_feats
         # (img_n, C, H, W)
         ref_feats_embed = ref_feats
-        roi_feats_embed = roi_feats_embed / roi_feats_embed.norm(
-            p=2, dim=1, keepdim=True)
-        ref_feats_embed = ref_feats_embed / ref_feats_embed.norm(
-            p=2, dim=1, keepdim=True)
+
+        roi_feats_embed = roi_feats_embed / (roi_feats_embed.norm(p=2, dim=1, keepdim=True) + self.epsilon)
+        ref_feats_embed = ref_feats_embed / (ref_feats_embed.norm(p=2, dim=1, keepdim=True) + self.epsilon)
+
         roi_n, c_embed, roi_h, roi_w = roi_feats_embed.size()
         img_n, c_embed, img_h, img_w = ref_feats_embed.size()
         # (roi_n, 7, 7, C)
@@ -182,7 +183,7 @@ class TemporalRoIAlign(SingleRoIExtractor):
         return ref_roi_feats
 
     @force_fp32(apply_to=('feats', 'ref_feats'), out_fp16=True)
-    def forward(self, feats, rois, roi_scale_factor=None, ref_feats=None):
+    def forward(self, feats, rois, roi_scale_factor=None, ref_feats=None, len_bbox=None):
         """Forward function."""
         roi_feats = super().forward(feats, rois, roi_scale_factor)
 
@@ -193,16 +194,30 @@ class TemporalRoIAlign(SingleRoIExtractor):
         else:
             # We only use the last level of reference feature map to perform
             # Most Similar RoI Align.
-            ref_roi_feats = self.most_similar_roi_align(
-                roi_feats, ref_feats[-1])
+            N = len(ref_feats)
+            if N > 1:
+                rois_feat_split = torch.split(roi_feats, len_bbox, dim = 0)
+                temporal_roi_feats = []
 
-            roi_feats = roi_feats.unsqueeze(0)
-            if self.num_temporal_attention_blocks > 0:
-                temporal_roi_feats = \
-                    self.temporal_attentional_feature_aggregation(
-                        roi_feats, ref_roi_feats)
+                for i in range(N):
+                    roi_feat = rois_feat_split[i]
+                    ref_roi_feats = self.most_similar_roi_align(roi_feat, ref_feats[i][0])
+
+                    roi_feat = roi_feat.unsqueeze(0)
+                    if self.num_temporal_attention_blocks > 0:
+                        temporal_roi_feat = self.temporal_attentional_feature_aggregation(roi_feat, ref_roi_feats)
+                        temporal_roi_feats.append(temporal_roi_feat)
+                    else:
+                        temporal_roi_feat = torch.cat((roi_feat, ref_roi_feats),dim=0)
+                        temporal_roi_feat = temporal_roi_feat.mean(dim=0)
+                        temporal_roi_feats.append(temporal_roi_feat)
             else:
-                temporal_roi_feats = torch.cat((roi_feats, ref_roi_feats),
-                                               dim=0)
-                temporal_roi_feats = temporal_roi_feats.mean(dim=0)
+                ref_roi_feats = self.most_similar_roi_align(roi_feats, ref_feats[-1])
+                roi_feats = roi_feats.unsqueeze(0)
+                if self.num_temporal_attention_blocks > 0:
+                    temporal_roi_feats = self.temporal_attentional_feature_aggregation(roi_feats, ref_roi_feats)
+                else:
+                    temporal_roi_feats = torch.cat((roi_feats, ref_roi_feats),dim=0)
+                    temporal_roi_feats = temporal_roi_feats.mean(dim=0)
+
             return temporal_roi_feats
