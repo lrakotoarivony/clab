@@ -7,7 +7,7 @@ The official implementation of our ACIVS 2025 paper:
 
 <img src="clab.png" alt="drawing">
 
-#### Install
+### Install
 Please first install the required dependencies. This can be done by:
 ```
 pip install mmcv-full==1.7.1 -f https://download.openmmlab.com/mmcv/dist/cu116/torch1.11/index.html
@@ -19,11 +19,11 @@ pip install -r requirements/build.txt
 pip install -v -e .
 ```
 
-#### Training
+### Training
 ```
 ./tools/dist_train.sh configs/vid/temporal_roi_align/selsa_troialign_faster_rcnn_r101_dc5_7e_imagenetvid.py 8
 ```
-#### Evaluation
+### Evaluation
 ```
 python tools/test.py configs/vid/temporal_roi_align/selsa_troialign_faster_rcnn_r101_dc5_7e_imagenetvid.py --checkpoint work_dirs/selsa_troialign_faster_rcnn_r101_dc5_7e_imagenetvid/epoch_7.pth --eval bbox --work-dir work_dirs/selsa_troialign_faster_rcnn_r101_dc5_7e_imagenetvid
 
